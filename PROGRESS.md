@@ -34,4 +34,48 @@ All 151 requested symbols resolved to Entrez; 0 dropped.
 | Test 20% (n=57) | 0.9762 | 0.9628 | 0.810 | 0.944 | 0.850 |
 - CV confusion: TN=165 FP=12 FN=7 TP=99. Test confusion: TN=34 FP=2 FN=4 TP=17.
 
-Next: Phase 3 (score -1 set into tiered queue), Phase 4 (expression validation).
+## 2026-07-07 — Phase 3 (score -1 set → tiered queue) — COMPLETE
+Scored all 125 ambiguous (-1) cases with the model refit on all labeled data.
+Ranked by `model_probability` (resemblance to -2). Tiers: >0.75 High,
+0.50–0.75 Medium, <0.50 Low. Queue cached to
+`cache/review_queue_*.csv` with 9p21 context columns (MTAP/CDKN2A/CDKN2B GISTIC).
+
+**Tier counts (n=125):**
+| Tier | Range | n | % |
+|---|---|---|---|
+| High | >0.75 | 50 | 40% |
+| Medium | 0.50–0.75 | 20 | 16% |
+| Low | <0.50 | 55 | 44% |
+
+## 2026-07-07 — Phase 4 (expression validation) — COMPLETE
+Orthogonal check: MTAP RNA-seq (RSEM), log2(x+1)-transformed. Four groups; the
+queue score does NOT use expression. Fix applied: matplotlib 3.11 renamed
+`boxplot(labels=...)` to `tick_labels=...`. Figure + stats saved to `models/`.
+
+**Group medians (MTAP expression, log2(RSEM+1)):**
+| Group | n | median log2 |
+|---|---|---|
+| -2 homozygous deletion | 106 | 5.9231 |
+| -1 high-priority (High tier) | 50 | 9.5214 |
+| -1 low-priority (Low tier) | 55 | 9.6571 |
+| 0/1/2 reference | 173 | 10.2485 |
+
+**Mann-Whitney, -1 High vs -1 Low:** U=1126, **p=0.111** (n_high=50, n_low=55, two-sided).
+
+Artifacts: `models/expression_validation_*.png`, `models/expression_validation_*.json`.
+
+---
+
+## ⛔ HARD STOP #1 — awaiting review before Phase 5
+
+The two verdict numbers for the morning:
+1. **AUC with CDKN2A:** CV ROC-AUC 0.9716 / PR-AUC 0.919 (test 0.976 / 0.963).
+   The without-CDKN2A ablation is Phase 5 — not yet run, so whether AUC *survives
+   dropping CDKN2A* is still unknown.
+2. **Expression separation, high vs low -1:** medians 9.52 vs 9.66, Mann-Whitney
+   **p=0.111** (not below 0.05). The -2 group (median 5.92) is clearly separated
+   from all -1 and reference groups; the high- vs low-priority -1 separation is
+   small on this cohort.
+
+Reporting numbers only, not judging them. Stopping here per instructions.
+Next (on "continue"): Phase 5 ablations (with / without CDKN2A / without 9p21).
