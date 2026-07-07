@@ -122,6 +122,61 @@ def print_metrics(m):
     print(f"  Test confusion: TN={tcm['tn']} FP={tcm['fp']} FN={tcm['fn']} TP={tcm['tp']}")
 
 
+def run_ablations():
+    """Phase 5: retrain the primary model on three feature sets, report side by side.
+
+    Identical setup each time (L2, class_weight=balanced, stratified 80/20,
+    random_state=42, 5-fold CV); only the feature columns change.
+    """
+    import genes as G
+
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    ds = data_prep.build_dataset()
+    data_prep.summarize(ds)
+    all_feats = ds["feature_genes"]  # MTAP already excluded
+
+    # 9p21 neighborhood present in the panel (MTAP is the label, not a feature).
+    nine_p21_features = [g for g in G.NINE_P21_SYMBOLS
+                         if g != "MTAP" and g in all_feats]
+
+    configs = [
+        ("with_CDKN2A", all_feats, []),
+        ("without_CDKN2A", [g for g in all_feats if g != "CDKN2A"], ["CDKN2A"]),
+        ("without_9p21_neighborhood",
+         [g for g in all_feats if g not in nine_p21_features],
+         list(nine_p21_features)),
+    ]
+
+    results = []
+    for label, feats, dropped in configs:
+        m, _ = train_and_evaluate(ds["X"], ds["y"], feats, label=label)
+        m["dropped_genes"] = dropped
+        results.append(m)
+        print_metrics(m)
+
+    # Side-by-side table.
+    print("\n=== THREE-WAY ABLATION (side by side) ===")
+    hdr = f"{'model':<28}{'feats':>6}{'CV ROC':>9}{'CV PR':>8}{'sens':>7}{'spec':>7}{'F1':>7}{'test ROC':>10}"
+    print(hdr)
+    print("-" * len(hdr))
+    for m in results:
+        cv = m["cv_5fold"]
+        print(f"{m['label']:<28}{m['n_features']:>6}{m['cv_roc_auc']:>9}{m['cv_pr_auc']:>8}"
+              f"{cv['sensitivity']:>7}{cv['specificity']:>7}{cv['f1']:>7}{m['test_roc_auc']:>10}")
+
+    out = {
+        "cohort": ds["study"],
+        "random_seed": RANDOM_STATE,
+        "model": "L2 logistic regression (StandardScaler), class_weight=balanced",
+        "nine_p21_features_dropped_in_model3": list(nine_p21_features),
+        "models": results,
+    }
+    with open(os.path.join(MODELS_DIR, "ablation_metrics.json"), "w") as f:
+        json.dump(out, f, indent=2)
+    print(f"\n[model] saved ablation_metrics.json -> {MODELS_DIR}")
+    return out
+
+
 def main():
     os.makedirs(MODELS_DIR, exist_ok=True)
     ds = data_prep.build_dataset()
@@ -171,4 +226,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--ablations" in sys.argv:
+        run_ablations()
+    else:
+        main()

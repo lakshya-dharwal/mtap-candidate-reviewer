@@ -79,3 +79,29 @@ The two verdict numbers for the morning:
 
 Reporting numbers only, not judging them. Stopping here per instructions.
 Next (on "continue"): Phase 5 ablations (with / without CDKN2A / without 9p21).
+
+## 2026-07-07 — Phase 5 (three-way ablation) — COMPLETE
+Primary logistic model retrained three times, identical setup each time (L2,
+`class_weight='balanced'`, stratified 80/20, `random_state=42`, 5-fold CV);
+only the feature columns change. Saved to `models/ablation_metrics.json`.
+
+**Genes dropped in model 3 (whole 9p21 neighborhood):** `CDKN2A`, `CDKN2B`.
+Panel check: the only other chr9p gene present is `JAK2` (9p24.1), which is NOT
+part of the 9p21.3 neighborhood and was kept. MTAP is the label and is already
+excluded from all feature sets.
+
+**Three-way table (n_pos=106, n_ref=177):**
+| Model | feats | CV ROC-AUC | CV PR-AUC | Sens | Spec | F1 | Test ROC-AUC |
+|---|---|---|---|---|---|---|---|
+| with CDKN2A | 150 | 0.9716 | 0.9190 | 0.9340 | 0.9322 | 0.9124 | 0.9762 |
+| without CDKN2A | 149 | 0.9464 | 0.8827 | 0.8774 | 0.9379 | 0.8857 | 0.9074 |
+| without 9p21 (CDKN2A+CDKN2B) | 148 | 0.7751 | 0.6659 | 0.6604 | 0.7853 | 0.6542 | 0.6772 |
+
+Numbers reported without interpretation, per instructions.
+
+---
+
+## ⛔ HARD STOP #2 (pre-Phase-6) — awaiting review
+Verdict number #1 (does AUC survive dropping CDKN2A) is now answered by the
+table above. Stopping here per instructions. Next (on "continue"): Phase 6
+(Streamlit app wrapping Phases 2–5).
