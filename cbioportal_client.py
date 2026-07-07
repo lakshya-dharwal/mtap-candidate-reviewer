@@ -89,6 +89,49 @@ def pick_profile(client, study, substring):
 
 
 # --------------------------------------------------------------------------- #
+# Hugo symbol -> Entrez resolution (cache-first)
+# --------------------------------------------------------------------------- #
+def resolve_symbols_to_entrez(client, symbols, cache_name="gene_map"):
+    """Resolve Hugo symbols to Entrez IDs; cache to CSV.
+
+    Returns a DataFrame with columns: hugoGeneSymbol, entrezGeneId.
+    Symbols the API cannot resolve are simply absent (logged by the caller).
+    """
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    cache_path = os.path.join(CACHE_DIR, f"{cache_name}.csv")
+    if os.path.exists(cache_path):
+        print(f"[genes] cache hit: {cache_path}")
+        return pd.read_csv(cache_path)
+
+    if client is not None:
+        recs = client.Genes.fetchGenesUsingPOST(
+            geneIdType="HUGO_GENE_SYMBOL", geneIds=list(symbols)
+        ).result()
+        rows = [
+            {"hugoGeneSymbol": g.hugoGeneSymbol, "entrezGeneId": g.entrezGeneId}
+            for g in recs
+        ]
+    else:
+        resp = requests.post(
+            f"{API_URL}/genes/fetch",
+            params={"geneIdType": "HUGO_GENE_SYMBOL"},
+            json=list(symbols),
+            headers={"Content-Type": "application/json"},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        rows = [
+            {"hugoGeneSymbol": g["hugoGeneSymbol"], "entrezGeneId": g["entrezGeneId"]}
+            for g in resp.json()
+        ]
+
+    df = pd.DataFrame(rows, columns=["hugoGeneSymbol", "entrezGeneId"])
+    df.to_csv(cache_path, index=False)
+    print(f"[genes] resolved {len(df)}/{len(symbols)} symbols -> cached {cache_path}")
+    return df
+
+
+# --------------------------------------------------------------------------- #
 # Fetch (cache-first)
 # --------------------------------------------------------------------------- #
 def fetch_molecular_data(client, study, profile_id, entrez_ids, cache_name):
