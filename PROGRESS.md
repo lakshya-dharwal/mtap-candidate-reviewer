@@ -105,3 +105,33 @@ Numbers reported without interpretation, per instructions.
 Verdict number #1 (does AUC survive dropping CDKN2A) is now answered by the
 table above. Stopping here per instructions. Next (on "continue"): Phase 6
 (Streamlit app wrapping Phases 2–5).
+
+## 2026-07-07 — Phases 6 + 7 + 7.5 (Streamlit UI + integrity spine + restyle) — COMPLETE
+**Note:** the restyle request assumed Phases 6/7 were already built, but the
+session had stopped at HARD STOP #2 — `app.py` did not exist. Built Phases 6 and
+7 together with the IDEAYA styling applied from the start (conservative,
+intent-serving choice). No data/model/metric changed; the UI only renders cached
+artifacts.
+
+- `shap_explain.py`: exact linear SHAP (StandardScaler + L2 logistic). Global
+  importance (top: CDKN2A 2.41, CDKN2B 1.74) + per-patient "why flagged" strings.
+- `app.py` panels: cohort selector + prevalence stat cards; model-performance
+  three-way ablation table + cards; expression-validation figure + medians +
+  Mann-Whitney; enriched review queue (MTAP/CDKN2A/CDKN2B GISTIC, MTAP expr
+  percentile, model probability progress bar, tier, why-flagged SHAP) with tier
+  filter; provenance/audit panel; exclusions-log panel.
+- **Phase 7.5 IDEAYA restyle:** `.streamlit/config.toml` base theme
+  (primaryColor #1E9BD7, bg #EEF4F8) + injected CSS — navy hero banner, Poppins
+  headings, ALL-CAPS letter-spaced eyebrows with rotating accent rule-lines
+  (#2B8A8A/#5BA84A/#A3C644), white rounded cards with soft shadows. Styled in the
+  spirit of IDEAYA's brand; no logo/affiliation claimed.
+
+**Fixes noted:** (1) streamlit was left half-installed by the Phase-1
+out-of-disk error (files present, metadata missing) — reinstalled cleanly
+(1.59.0). (2) Replaced deprecated `use_container_width=True` with
+`width="stretch"`. Verified via `streamlit.testing.v1.AppTest`: runs with no
+exceptions, 3 dataframes / 18 metrics, tier-filter interaction works.
+
+Pushed to origin (github.com/lakshya-dharwal/mtap-candidate-reviewer).
+Per instructions: STOP. Phase 8 (pan-cancer, XGBoost secondary, concordance)
+NOT built — it is the cut list.
