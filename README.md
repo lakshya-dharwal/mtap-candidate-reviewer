@@ -1,17 +1,18 @@
 # MTAP-Loss Candidate Reviewer
 
-An **expression-validated review queue for ambiguous MTAP shallow-loss tumors.**
+A **scientist-facing review queue for ambiguous MTAP shallow-loss tumors, with
+orthogonal expression checking and audit artifacts.**
 
-The tool trains a machine-learning model on unambiguous MTAP homozygous
-deletions, then **ranks the ambiguous shallow-loss (`-1`) tumors whose
-copy-number profile resembles confirmed-deleted cases**, and validates that the
-high-priority ones actually show suppressed MTAP expression.
+The tool trains on unambiguous MTAP homozygous deletions, then **ranks the
+ambiguous shallow-loss (`-1`) tumors whose copy-number profile resembles
+confirmed-deleted cases**. It then checks whether that ranking is supported by
+independent MTAP RNA expression.
 
 > It ranks MTAP shallow-loss tumors whose CNA profiles resemble confirmed
-> homozygous-deleted cases, then validates whether those high-priority cases
-> show suppressed MTAP expression. It does **not** claim to detect or find
-> "missed MTAP-deficient patients" — it prioritizes candidates for orthogonal
-> human review.
+> homozygous-deleted cases, then checks whether those high-priority cases show
+> lower MTAP expression. It does **not** claim to detect or find "missed
+> MTAP-deficient patients" — it prioritizes candidates for orthogonal human
+> review.
 
 ## Cohort
 Bladder — `blca_tcga_pan_can_atlas_2018` (TCGA PanCancer Atlas). CNA from the
@@ -31,13 +32,43 @@ validation-only and never a feature.
 
 ## Pipeline
 `cbioportal_client.py` (fetch + cache) → `data_prep.py` (feature matrix, labels,
-exclusions) → `model.py` (L2 logistic regression, primary) → tiered review queue
-→ `validate_expression.py` (four-group expression comparison).
+exclusions) → `model.py` (L2 logistic regression, primary + ablations +
+permutation control) → `secondary_model.py` (XGBoost comparison + queue
+agreement) → `deletion_burden.py` (genome / chr9p / combined burden baselines)
+→ percentile-tiered review queue → `validate_expression.py` (four-group
+expression comparison) → `app.py` (Streamlit review UI over cached artifacts).
+
+## Current results
+- Cohort counts: 106 confirmed `-2` positives, 177 `0/1/2` reference tumors,
+  and 125 ambiguous `-1` tumors queued for review.
+- Primary model (`model.py`, logistic): CV ROC-AUC `0.9716` with bootstrap 95%
+  CI `[0.9501, 0.9888]`; CV PR-AUC `0.9190` with 95% CI `[0.8468, 0.9793]`.
+- The fixed-threshold (`0.5`) held-out test ROC-AUC is `0.9762`; the CV
+  Youden-optimal threshold is `0.2011`.
+- Percentile queue tiers are now fixed at top `20%` High / next `30%` Medium /
+  bottom `50%` Low, yielding `25 / 38 / 62` cases on this cohort.
+- Three-way ablation: dropping `CDKN2A` lowers CV ROC-AUC to `0.9464`; dropping
+  the 9p21 neighborhood (`CDKN2A`, `CDKN2B`) lowers it to `0.7751`.
+- Permutation control: 20 random 2-gene drops produce a null CV ROC-AUC range
+  of `0.9697` to `0.9742`; the 9p21 drop sits at the `0th` percentile of that
+  null, confirming the effect is specific rather than a generic 2-feature loss.
+- Secondary model (`secondary_model.py`, XGBoost): CV ROC-AUC `0.9861`, CV
+  PR-AUC `0.9621`, but only `58.4%` exact tier agreement with the logistic
+  queue and High-tier Jaccard overlap `0.4706` (`16` shared of `25` each).
+- Deletion-burden decomposition: genome-wide deletion burden alone is near
+  chance (CV ROC-AUC `0.4969`), chr9p-only burden alone reaches `0.9798`, and
+  combined genome+chr9p burden reaches `0.9837`.
+- Expression check on the ambiguous `-1` queue is currently a **null result**:
+  High-tier median `9.616` vs Low-tier median `9.6247`, Mann-Whitney
+  `p=0.5961` (`n_high=25`, `n_low=62`).
 
 ## Honest limitations
 - Public TCGA data, not IDEAYA assay data.
 - "Candidate" = CNA-profile resemblance to confirmed-deleted cases, validated by
   expression — **not** IHC/FISH-confirmed truth.
+- The current orthogonal expression check is a **null result** on this cohort:
+  the High-tier `-1` cases do not show significantly lower MTAP expression than
+  the Low-tier `-1` cases (`p=0.5961`).
 - Small positive counts widen confidence intervals; every AUC is now reported
   with a bootstrap 95% CI (`models/metrics.json`'s `cv_auc_ci95`), not just a
   point estimate.
@@ -114,5 +145,6 @@ python deletion_burden.py       # deletion-burden baseline (genome/chr9p/combine
 python score_queue.py           # tiered review queue for the -1 set
 python validate_expression.py   # four-group expression figure + Mann-Whitney
 pytest tests/ -v                # pipeline invariant checks
+streamlit run app.py            # tabbed review UI over cached artifacts
 ```
 All steps are cache-only after the initial pull (`cache/`).
