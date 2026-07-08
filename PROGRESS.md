@@ -166,3 +166,30 @@ Note (Py 3.11): fixed an f-string with backslash-escaped quotes inside `{}`
 (SyntaxError pre-3.12) by moving the span literal out of the expression.
 
 Next: Stage 2 (deletion-burden baseline).
+
+## 2026-07-08 — Stage 2 (deletion-burden baseline) — COMPLETE
+Attempted after Stage 1 committed + verified clean. Ran cleanly on first pass;
+kept. Answers the sharpest critique ("is it just learning deletion burden?").
+
+- `genes.py`: added `CHR9P_SYMBOLS = ["CDKN2A","CDKN2B","JAK2"]` (panel's non-label
+  chr-9p genes; MTAP excluded as label, per no-leakage rule).
+- `deletion_burden.py` (new): two features from the cached CNA matrix —
+  `genome_deletion_burden` (fraction of 150 genes with GISTIC<0) and
+  `chr9p_deletion_burden` — trained with the SAME `model.train_and_evaluate`
+  routine (−2 vs reference). Saved `models/deletion_burden_metrics.json` with a
+  `comparison_to_full_model` block + auto-generated honest sentence.
+- app.py needed **zero edits** — the file-existence gate lit up the burden card
+  and flipped the sanity-check line to ✓ (verified via AppTest, 26 metrics).
+
+**Result (the honest headline):**
+| Model | features | CV ROC-AUC | CV PR-AUC |
+|---|---|---|---|
+| Full model | 150 | 0.9716 | 0.9190 |
+| Deletion-burden baseline | 2 | **0.9837** | 0.9633 |
+
+The full model does **NOT** outperform the deletion-burden baseline — the
+−2-vs-reference signal is largely explained by overall / chr-9p deletion load
+(chr9p burden includes co-deleted CDKN2A/CDKN2B). Reported as-is. This is the
+control to lead with: it is a mature, honest finding, and it reframes the tool's
+contribution toward the expression-validation and review-routing story rather
+than raw discrimination.

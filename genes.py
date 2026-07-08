@@ -19,6 +19,12 @@ CORE_GENES = {"MTAP": MTAP, "CDKN2A": CDKN2A, "CDKN2B": CDKN2B}
 # feature); CDKN2A/CDKN2B are the physically-adjacent co-deleted genes.
 NINE_P21_SYMBOLS = ["MTAP", "CDKN2A", "CDKN2B"]
 
+# Chromosome-9p genes present in the 150-feature panel, used for the
+# chr-9p deletion-burden baseline. MTAP is deliberately excluded (it is the
+# label — consistent with this project's project-wide no-leakage rule), so this
+# lists the panel's non-label 9p genes: CDKN2A/CDKN2B (9p21.3) and JAK2 (9p24.1).
+CHR9P_SYMBOLS = ["CDKN2A", "CDKN2B", "JAK2"]
+
 # --- ~150-gene recurrently-altered cancer panel (Hugo symbols) -------------- #
 # Deduplicated at load time. Resolved to Entrez via the API and cached.
 PANEL_SYMBOLS = list(dict.fromkeys([
