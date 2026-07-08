@@ -40,7 +40,25 @@ def load_or_build_panel_cna(study=STUDY):
     cache_path = os.path.join(CACHE_DIR, f"cna_panel_{study}.csv")
     gene_map_path = os.path.join(CACHE_DIR, "gene_map.csv")
 
-    if os.path.exists(cache_path) and os.path.exists(gene_map_path):
+    # This short-circuit intentionally avoids ANY network call (not even
+    # cc.connect()) when the cache is warm, per the project's "never hit the
+    # API again during dev" design constraint. It validates the panel
+    # content-hash itself (no network needed for that, and a DIFFERENT sig
+    # file from cc.fetch_molecular_data's own study+profile_id+entrez_ids sig,
+    # since profile_id isn't known without a network call) — otherwise a
+    # changed PANEL_SYMBOLS would silently keep serving a stale panel forever.
+    panel_sig_path = cache_path + ".panelsig"
+    panel_sig = cc._sig(study, sorted(G.PANEL_SYMBOLS))
+    cache_ok = os.path.exists(cache_path) and os.path.exists(gene_map_path)
+    sig_ok = (os.path.exists(panel_sig_path)
+             and open(panel_sig_path).read().strip() == panel_sig)
+    if cache_ok and sig_ok:
+        return pd.read_csv(cache_path), pd.read_csv(gene_map_path)
+    if cache_ok and not os.path.exists(panel_sig_path):
+        # Pre-existing cache from before this check existed — grandfather it
+        # in rather than force an unnecessary re-pull, and backfill the sig.
+        with open(panel_sig_path, "w") as f:
+            f.write(panel_sig)
         return pd.read_csv(cache_path), pd.read_csv(gene_map_path)
 
     client = cc.connect()
@@ -56,6 +74,8 @@ def load_or_build_panel_cna(study=STUDY):
     panel_cna = cc.fetch_molecular_data(
         client, study, cna_profile, entrez_ids, f"cna_panel_{study}"
     )
+    with open(panel_sig_path, "w") as f:
+        f.write(panel_sig)
     return panel_cna, gene_map
 
 

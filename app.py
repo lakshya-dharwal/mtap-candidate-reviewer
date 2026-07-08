@@ -31,6 +31,7 @@ STUDY = data_prep.STUDY
 MODELS_DIR = M.MODELS_DIR
 SECONDARY_PATH = os.path.join(MODELS_DIR, "secondary_xgboost_metrics.json")
 DELETION_BURDEN_PATH = os.path.join(MODELS_DIR, "deletion_burden_metrics.json")
+QUEUE_AGREEMENT_PATH = os.path.join(MODELS_DIR, "queue_model_agreement.json")
 
 # --- IDEAYA brand palette --------------------------------------------------- #
 NAVY = "#0C2D48"
@@ -168,6 +169,7 @@ def load_all():
         "provenance": _load_json("provenance.json"),
         "secondary": _load_path(SECONDARY_PATH),
         "deletion_burden": _load_path(DELETION_BURDEN_PATH),
+        "queue_agreement": _load_path(QUEUE_AGREEMENT_PATH),
         "expr_stats": _load_json(f"expression_validation_{STUDY}.json"),
         "expr_fig": os.path.join(MODELS_DIR, f"expression_validation_{STUDY}.png"),
         "exclusions": pd.read_csv(data_prep.EXCLUSIONS_PATH)
@@ -280,10 +282,20 @@ def tab_overview(data):
         <div class="callout check">
         <ul>
           <li>Single cohort (bladder only) — needs external / cross-cohort validation.</li>
-          <li>Deletion-burden baseline still to add (is signal MTAP-specific?).</li>
+          <li>Deletion-burden baseline: genome-wide burden is at chance (0.50);
+              signal is 9p21-local, confirmed by ablation + permutation control
+              (see Validation tab) — not yet an independent "beyond deletion load" win.</li>
+          <li>Logistic vs XGBoost only agree on 58% of −1 tiers — model choice
+              materially changes who's prioritized; unreconciled.</li>
           <li>Model scores are <b>not yet calibrated</b> probabilities.</li>
-          <li>Shallow −1 loss is biologically heterogeneous — tumor purity,
-              subclonality, segmentation noise.</li>
+          <li>Reference class pools neutral/gain/amplified GISTIC calls (0/1/2)
+              without checking for a subgroup effect.</li>
+          <li>Tumor purity not modeled — no purity attribute available via
+              cBioPortal's clinical API for this cohort.</li>
+          <li>150-gene panel is hand-curated, not empirically derived from this
+              cohort or a single cited driver census.</li>
+          <li>Shallow −1 loss is biologically heterogeneous — subclonality,
+              segmentation noise.</li>
           <li>Prioritizes cases for review; <b>not a diagnostic</b>.</li>
         </ul>
         </div>
@@ -291,13 +303,20 @@ def tab_overview(data):
     with san:
         section("MODEL SANITY CHECKS", "leakage & robustness", ACCENTS[2])
         burden_done = data["deletion_burden"] is not None
+        ab = data.get("ablation") or {}
         checks = [
             ("MTAP excluded from features", True),
+            ("Patient-level duplication checked (none found)", True),
             ("CDKN2A / CDKN2B ablation run", True),
             ("Full 9p21-neighborhood ablation run", True),
+            ("Permutation/null control on ablation", "permutation_control" in ab),
             ("Cross-validation (5-fold)", True),
-            ("Deletion-burden baseline", burden_done),
+            ("Bootstrap 95% CI on AUC", True),
+            ("Deletion-burden baseline (decomposed)", burden_done),
+            ("Cross-model (logistic vs XGBoost) queue agreement checked",
+             data.get("queue_agreement") is not None),
             ("Score calibration", False),
+            ("Tumor purity adjustment", False),
             ("External validation", False),
         ]
         pending = ' <span style="color:#5B7488">(pending)</span>'
@@ -387,13 +406,29 @@ def tab_validation(data):
         cc[0].pyplot(plot_roc(m, sec))
         cc[1].pyplot(plot_pr(m, sec))
     if m:
+        ci = m.get("cv_auc_ci95", {})
+        st.caption(f"CV ROC-AUC {m['cv_roc_auc']} (95% bootstrap CI "
+                   f"{ci.get('roc_auc_ci95', '—')}) · CV PR-AUC {m['cv_pr_auc']} "
+                   f"(95% CI {ci.get('pr_auc_ci95', '—')}), n={ci.get('n_boot', '?')} resamples. "
+                   f"Small positive count (n={m['n_positive']}) widens these intervals.")
         cm = m["test_at_0.5"]["confusion_matrix"]
-        st.markdown("**Confusion matrix** (held-out 20%, threshold 0.5)")
+        cmc1, cmc2 = st.columns(2)
+        cmc1.markdown("**Confusion matrix** (held-out 20%, threshold 0.5)")
         cm_df = pd.DataFrame(
             [[cm["tn"], cm["fp"]], [cm["fn"], cm["tp"]]],
             index=["Actual reference", "Actual −2"],
             columns=["Pred reference", "Pred −2"])
-        st.dataframe(cm_df, width="content")
+        cmc1.dataframe(cm_df, width="content")
+        if "cv_youden_threshold" in m:
+            yj = m["cv_at_youden"]
+            cmc2.markdown(f"**Youden's-J optimal threshold** ({m['cv_youden_threshold']}, "
+                          f"vs the fixed 0.5 used above)")
+            yj_df = pd.DataFrame(
+                [["sensitivity", yj["sensitivity"]], ["specificity", yj["specificity"]],
+                 ["F1", yj["f1"]]], columns=["metric", "value at Youden-J"])
+            cmc2.dataframe(yj_df, hide_index=True, width="content")
+            cmc2.caption("class_weight='balanced' shifts the natural decision boundary "
+                        "away from 0.5 — this is the data-driven optimal cut instead.")
 
     section("THREE-WAY ABLATION", "Does it learn beyond the 9p21 neighbor?", ACCENTS[1],
             "L2 logistic, identical setup; only the feature set changes.")
@@ -401,9 +436,11 @@ def tab_validation(data):
         rows = []
         for x in ab["models"]:
             cv = x["cv_5fold"]
+            ci = x.get("cv_auc_ci95", {}).get("roc_auc_ci95")
             rows.append({
                 "Model": x["label"].replace("_", " "), "Features": x["n_features"],
-                "CV ROC-AUC": x["cv_roc_auc"], "CV PR-AUC": x["cv_pr_auc"],
+                "CV ROC-AUC": x["cv_roc_auc"], "95% CI": str(ci),
+                "CV PR-AUC": x["cv_pr_auc"],
                 "Sensitivity": cv["sensitivity"], "Specificity": cv["specificity"],
                 "F1": cv["f1"], "Test ROC-AUC": x["test_roc_auc"]})
         cols = st.columns(3)
@@ -416,6 +453,20 @@ def tab_validation(data):
                    f"n_positive={ab['models'][0]['n_positive']}, "
                    f"n_reference={ab['models'][0]['n_reference']}.")
 
+        pc = ab.get("permutation_control")
+        if pc:
+            if pc["without_9p21_auc"] < pc["null_auc_min"]:
+                pc_verdict = "below every single random drop"
+            else:
+                pc_verdict = f"at the {pc['without_9p21_percentile_within_null']:.0f}th percentile of the null"
+            st.markdown(f"<div class='card'><b>Permutation control</b> — is the AUC drop "
+                       f"specific to 9p21, or would dropping ANY 2 genes do the same? "
+                       f"{pc['n_replicates']} replicates dropped 2 random non-9p21 genes: "
+                       f"null AUC {pc['null_auc_mean']} ± {pc['null_auc_std']} "
+                       f"(range [{pc['null_auc_min']}, {pc['null_auc_max']}]) vs the true "
+                       f"9p21 drop of <b>{pc['without_9p21_auc']}</b> — {pc_verdict}.</div>",
+                       unsafe_allow_html=True)
+
     if sec:
         section("SECONDARY MODEL", "XGBoost comparison", ACCENTS[2],
                 "Nonlinear comparison point; logistic stays primary.")
@@ -426,15 +477,33 @@ def tab_validation(data):
             st.caption(f"XGBoost achieves CV ROC-AUC {sec['cv_roc_auc']} vs "
                        f"{m['cv_roc_auc']} for the primary logistic model "
                        f"(same 150 features, same folds, seed 42).")
+        qa = data.get("queue_agreement")
+        if qa:
+            st.markdown(
+                f"<div class='card'><b>Queue agreement</b> — does the higher-AUC model "
+                f"rank the same ambiguous cases as high priority? On the {qa['n_scored']} "
+                f"scored −1 cases: Spearman score correlation "
+                f"<b>{qa['spearman_score_correlation']}</b>, exact tier agreement "
+                f"<b>{qa['tier_exact_agreement_rate']:.0%}</b>, High-tier Jaccard overlap "
+                f"<b>{qa['high_tier_jaccard']:.0%}</b> ({qa['n_high_both']} shared of "
+                f"{qa['n_high_logistic']} logistic / {qa['n_high_xgboost']} XGBoost). "
+                f"The deployed queue uses the logistic model only — this is NOT yet "
+                f"reconciled.</div>", unsafe_allow_html=True)
 
     if data["deletion_burden"]:
         db = data["deletion_burden"]
-        section("DELETION-BURDEN BASELINE", "Is the signal MTAP-specific?", ACCENTS[0],
-                "Baseline trained on only genome-wide + 9p deletion burden.")
-        bc = st.columns(2)
-        bc[0].metric("Full model CV ROC-AUC", db["comparison_to_full_model"]["full_model_cv_roc_auc"])
-        bc[1].metric("Burden baseline CV ROC-AUC", db["cv_roc_auc"])
-        st.caption(db["comparison_to_full_model"]["statement"])
+        section("DELETION-BURDEN BASELINE", "Is the signal MTAP-specific — or 9p21-specific?",
+                ACCENTS[0], "Decomposed into genome-wide vs chr-9p burden separately, "
+                "since they answer different questions.")
+        cmp = db["comparison_to_full_model"]
+        bc = st.columns(4)
+        bc[0].metric("Full model", cmp["full_model_cv_roc_auc"], help="150 genes")
+        bc[1].metric("Genome-wide burden alone", cmp["genome_only_cv_roc_auc"],
+                    help="fraction of 150 genes deleted — near chance")
+        bc[2].metric("Chr9p burden alone", cmp["chr9p_only_cv_roc_auc"],
+                    help="CDKN2A/CDKN2B/JAK2 only")
+        bc[3].metric("Genome + chr9p", cmp["combined_cv_roc_auc"])
+        st.markdown(f"<div class='card'>{cmp['statement']}</div>", unsafe_allow_html=True)
 
     section("GLOBAL EXPLAINABILITY", "Which genes drive the score", ACCENTS[1])
     st.pyplot(plot_shap_bar(data["global_shap"]))
@@ -475,6 +544,14 @@ def tab_provenance(data):
     c[1].metric("Ambiguous −1 (queue)", int((role == "ambiguous").sum()))
     c[2].metric("Reference 0/1/2", int((role == "reference").sum()))
     c[3].metric("Features (MTAP excluded)", len(ds["feature_genes"]))
+    mtap = ds["mtap_cna"]
+    rc1, rc2, rc3 = st.columns(3)
+    rc1.metric("Reference: neutral (0)", int((mtap == 0).sum()))
+    rc2.metric("Reference: gain (1)", int((mtap == 1).sum()))
+    rc3.metric("Reference: amplified (2)", int((mtap == 2).sum()))
+    st.caption("The 'reference' class pools 3 distinct GISTIC calls — gained/amplified "
+              "tumors are not copy-number-neutral, and this pooling is not further "
+              "examined for a subgroup effect.")
 
     section("DATA PROVENANCE", "Audit & inspection readiness", ACCENTS[1])
     prov = data["provenance"]

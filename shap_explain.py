@@ -20,7 +20,16 @@ def _explainer(pipeline, background_X, feature_genes):
     scaler = pipeline.named_steps["scale"]
     clf = pipeline.named_steps["clf"]
     bg_scaled = scaler.transform(background_X[feature_genes])
-    return shap.LinearExplainer(clf, bg_scaled), scaler
+    # GISTIC CNA features are highly correlated (co-deletion blocks — e.g.
+    # CDKN2A/CDKN2B move together in ~80-90% of 9p21-loss cases). The default
+    # ("interventional") SHAP mode assumes feature independence and can split
+    # credit between correlated features somewhat arbitrarily. Explicitly use
+    # "correlation_dependent", which estimates the background covariance from
+    # bg_scaled, so credit among correlated genes reflects their joint
+    # distribution rather than an independence assumption.
+    explainer = shap.LinearExplainer(
+        clf, bg_scaled, feature_perturbation="correlation_dependent")
+    return explainer, scaler
 
 
 def global_importance(pipeline, background_X, feature_genes):

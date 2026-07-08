@@ -14,7 +14,9 @@ from __future__ import annotations
 import json
 import os
 
+import joblib
 import numpy as np
+import pandas as pd
 from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
@@ -26,8 +28,13 @@ from xgboost import XGBClassifier
 
 import data_prep
 import model as M
+import score_queue
 
 RANDOM_STATE = M.RANDOM_STATE
+XGB_MODEL_PATH = os.path.join(M.MODELS_DIR, "model_secondary_xgb.joblib")
+XGB_QUEUE_PATH = os.path.join(data_prep.CACHE_DIR,
+                              f"review_queue_xgb_{data_prep.STUDY}.csv")
+AGREEMENT_PATH = os.path.join(M.MODELS_DIR, "queue_model_agreement.json")
 
 
 def make_xgb(n_pos, n_neg):
@@ -84,6 +91,51 @@ def main():
     print(f"  CV(5-fold)  ROC-AUC={metrics['cv_roc_auc']}  PR-AUC={metrics['cv_pr_auc']}  "
           f"sens={thr['sensitivity']}  spec={thr['specificity']}  F1={thr['f1']}")
     print(f"  saved -> {out_path}")
+
+    # --- Score the -1 queue with XGBoost too, and check agreement with the
+    # deployed logistic queue. If the two models disagree substantially on
+    # which -1 cases are high-priority, that's worth knowing before trusting
+    # either ranking. ---
+    final_xgb = make_xgb(n_pos, n_neg).fit(Xl, yl)
+    joblib.dump({"model": final_xgb, "feature_genes": feat}, XGB_MODEL_PATH)
+
+    amb = ds["role"] == "ambiguous"
+    X_amb = ds["X"].loc[amb, feat]
+    xgb_scores = final_xgb.predict_proba(X_amb)[:, 1]
+    xgb_q = pd.DataFrame({"sampleId": X_amb.index, "xgb_score": xgb_scores})
+    xgb_q["xgb_tier"] = score_queue.assign_tiers(xgb_q["xgb_score"]).values
+    xgb_q.to_csv(XGB_QUEUE_PATH, index=False)
+
+    log_q = score_queue.build_queue(ds)[["sampleId", "model_probability", "review_tier"]]
+    merged = log_q.merge(xgb_q, on="sampleId")
+    spearman = merged["model_probability"].corr(merged["xgb_score"], method="spearman")
+    tier_agree = (merged["review_tier"] == merged["xgb_tier"]).mean()
+    high_log = set(merged.loc[merged["review_tier"] == "High", "sampleId"])
+    high_xgb = set(merged.loc[merged["xgb_tier"] == "High", "sampleId"])
+    jaccard_high = (len(high_log & high_xgb) / len(high_log | high_xgb)
+                    if (high_log | high_xgb) else float("nan"))
+
+    agreement = {
+        "n_scored": int(len(merged)),
+        "spearman_score_correlation": round(float(spearman), 4),
+        "tier_exact_agreement_rate": round(float(tier_agree), 4),
+        "high_tier_jaccard": round(float(jaccard_high), 4),
+        "n_high_logistic": len(high_log), "n_high_xgboost": len(high_xgb),
+        "n_high_both": len(high_log & high_xgb),
+        "note": ("Logistic (primary) is the deployed queue model. This checks "
+                 "whether the higher-CV-AUC XGBoost model would rank the same "
+                 "-1 cases as high priority — low agreement would mean the "
+                 "choice of model materially changes who gets reviewed first."),
+    }
+    with open(AGREEMENT_PATH, "w") as f:
+        json.dump(agreement, f, indent=2)
+    print(f"\n=== queue agreement: logistic vs XGBoost on {len(merged)} ambiguous cases ===")
+    print(f"  Spearman score correlation: {agreement['spearman_score_correlation']}")
+    print(f"  Exact tier agreement: {agreement['tier_exact_agreement_rate']:.0%}")
+    print(f"  High-tier Jaccard overlap: {agreement['high_tier_jaccard']:.0%} "
+          f"({agreement['n_high_both']} shared of {agreement['n_high_logistic']} "
+          f"logistic / {agreement['n_high_xgboost']} xgboost)")
+    print(f"  saved -> {AGREEMENT_PATH}")
 
 
 if __name__ == "__main__":

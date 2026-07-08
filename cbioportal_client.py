@@ -10,19 +10,71 @@ Run:  python cbioportal_client.py
 
 from __future__ import annotations
 
+import hashlib
 import os
+import time
 
 import pandas as pd
 import requests
 
 API_URL = "https://www.cbioportal.org/api"
 # bravado only supports Swagger 2.0; the v3 endpoint is OpenAPI 3 and silently
-# returns None from calls. The v2 endpoint serves a Swagger 2.0 spec.
+# returns None from calls. The v2 endpoint serves a Swagger 2.0 spec. This is
+# the LEGACY, non-canonical endpoint — cBioPortal's documented/maintained API
+# is v3, so this could be deprecated without notice; the requests-based
+# fallback below hits v3 directly and isn't affected by that risk.
 SWAGGER_URL = f"{API_URL}/v2/api-docs"
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache")
 
 MTAP, CDKN2A, CDKN2B = 4507, 1029, 1030
 GENE_NAMES = {MTAP: "MTAP", CDKN2A: "CDKN2A", CDKN2B: "CDKN2B"}
+
+
+# --------------------------------------------------------------------------- #
+# Cache validity (content-hash gated) + retry helpers
+# --------------------------------------------------------------------------- #
+def _sig(*parts):
+    """Short content hash of the request parameters behind a cache file."""
+    return hashlib.sha256("|".join(str(p) for p in parts).encode()).hexdigest()[:16]
+
+
+def _cache_valid(cache_path, sig):
+    """True if cache_path exists AND its recorded signature matches `sig`.
+
+    A cache with no sidecar signature (pre-existing caches from before this
+    check existed) is grandfathered in as valid rather than force-invalidated
+    — but the signature is backfilled so future parameter changes ARE caught.
+    """
+    if not os.path.exists(cache_path):
+        return False
+    sig_path = cache_path + ".sig"
+    if not os.path.exists(sig_path):
+        with open(sig_path, "w") as f:
+            f.write(sig)
+        return True
+    return open(sig_path).read().strip() == sig
+
+
+def _write_sig(cache_path, sig):
+    with open(cache_path + ".sig", "w") as f:
+        f.write(sig)
+
+
+def _retry(fn, attempts=3, base_delay=1.0, what="request"):
+    """Retry `fn()` with exponential backoff on any exception. No retry logic
+    existed before — a single transient network blip killed the whole pull."""
+    last_exc = None
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - network calls fail many ways
+            last_exc = exc
+            if i < attempts - 1:
+                delay = base_delay * (2 ** i)
+                print(f"[retry] {what} failed ({exc!r}); retrying in {delay:.1f}s "
+                      f"({i + 1}/{attempts})")
+                time.sleep(delay)
+    raise last_exc
 
 
 # --------------------------------------------------------------------------- #
@@ -99,34 +151,41 @@ def resolve_symbols_to_entrez(client, symbols, cache_name="gene_map"):
     """
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(CACHE_DIR, f"{cache_name}.csv")
-    if os.path.exists(cache_path):
+    sig = _sig("genes", sorted(symbols))
+    if _cache_valid(cache_path, sig):
         print(f"[genes] cache hit: {cache_path}")
         return pd.read_csv(cache_path)
 
     if client is not None:
-        recs = client.Genes.fetchGenesUsingPOST(
-            geneIdType="HUGO_GENE_SYMBOL", geneIds=list(symbols)
-        ).result()
+        recs = _retry(
+            lambda: client.Genes.fetchGenesUsingPOST(
+                geneIdType="HUGO_GENE_SYMBOL", geneIds=list(symbols)
+            ).result(),
+            what="gene resolution (bravado)",
+        )
         rows = [
             {"hugoGeneSymbol": g.hugoGeneSymbol, "entrezGeneId": g.entrezGeneId}
             for g in recs
         ]
     else:
-        resp = requests.post(
-            f"{API_URL}/genes/fetch",
-            params={"geneIdType": "HUGO_GENE_SYMBOL"},
-            json=list(symbols),
-            headers={"Content-Type": "application/json"},
-            timeout=60,
-        )
-        resp.raise_for_status()
+        def _do_fetch():
+            resp = requests.post(
+                f"{API_URL}/genes/fetch",
+                params={"geneIdType": "HUGO_GENE_SYMBOL"},
+                json=list(symbols),
+                headers={"Content-Type": "application/json"},
+                timeout=60,
+            )
+            resp.raise_for_status()
+            return resp.json()
         rows = [
             {"hugoGeneSymbol": g["hugoGeneSymbol"], "entrezGeneId": g["entrezGeneId"]}
-            for g in resp.json()
+            for g in _retry(_do_fetch, what="gene resolution (requests)")
         ]
 
     df = pd.DataFrame(rows, columns=["hugoGeneSymbol", "entrezGeneId"])
     df.to_csv(cache_path, index=False)
+    _write_sig(cache_path, sig)
     print(f"[genes] resolved {len(df)}/{len(symbols)} symbols -> cached {cache_path}")
     return df
 
@@ -141,7 +200,8 @@ def fetch_molecular_data(client, study, profile_id, entrez_ids, cache_name):
     """
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(CACHE_DIR, f"{cache_name}.csv")
-    if os.path.exists(cache_path):
+    sig = _sig(study, profile_id, sorted(entrez_ids))
+    if _cache_valid(cache_path, sig):
         print(f"[fetch] cache hit: {cache_path}")
         return pd.read_csv(cache_path)
 
@@ -151,32 +211,38 @@ def fetch_molecular_data(client, study, profile_id, entrez_ids, cache_name):
     }
 
     if client is not None:
-        records = client.Molecular_Data.fetchAllMolecularDataInMolecularProfileUsingPOST(
-            molecularProfileId=profile_id,
-            molecularDataFilter=data_filter,
-            projection="SUMMARY",
-        ).result()
+        records = _retry(
+            lambda: client.Molecular_Data.fetchAllMolecularDataInMolecularProfileUsingPOST(
+                molecularProfileId=profile_id,
+                molecularDataFilter=data_filter,
+                projection="SUMMARY",
+            ).result(),
+            what=f"molecular data fetch (bravado, {cache_name})",
+        )
         rows = [
             {"sampleId": r.sampleId, "entrezGeneId": r.entrezGeneId, "value": r.value}
             for r in records
         ]
     else:
-        url = f"{API_URL}/molecular-profiles/{profile_id}/molecular-data/fetch"
-        resp = requests.post(
-            url,
-            params={"projection": "SUMMARY"},
-            json=data_filter,
-            headers={"Content-Type": "application/json"},
-            timeout=120,
-        )
-        resp.raise_for_status()
+        def _do_fetch():
+            url = f"{API_URL}/molecular-profiles/{profile_id}/molecular-data/fetch"
+            resp = requests.post(
+                url,
+                params={"projection": "SUMMARY"},
+                json=data_filter,
+                headers={"Content-Type": "application/json"},
+                timeout=120,
+            )
+            resp.raise_for_status()
+            return resp.json()
         rows = [
             {"sampleId": r["sampleId"], "entrezGeneId": r["entrezGeneId"], "value": r["value"]}
-            for r in resp.json()
+            for r in _retry(_do_fetch, what=f"molecular data fetch (requests, {cache_name})")
         ]
 
     df = pd.DataFrame(rows, columns=["sampleId", "entrezGeneId", "value"])
     df.to_csv(cache_path, index=False)
+    _write_sig(cache_path, sig)
     print(f"[fetch] pulled {len(df)} records -> cached {cache_path}")
     return df
 

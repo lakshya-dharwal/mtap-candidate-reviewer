@@ -1,15 +1,21 @@
 """Stage 2: deletion-burden baseline.
 
 Answers the sharpest critique of the full model — "is it just learning overall
-deletion load, not MTAP-specific context?" — by training a logistic model on
-only two crude burden features and comparing it to the full 150-gene model.
+deletion load, not MTAP-specific context?" — by training on crude burden
+features and comparing to the full 150-gene model.
 
-Features (from the existing cached CNA matrix, no new pull):
-  - genome_deletion_burden : fraction of the 150 panel genes with GISTIC < 0
-  - chr9p_deletion_burden  : fraction of the panel's chr-9p genes with GISTIC < 0
+IMPORTANT nuance (found during audit): the two burden features are NOT
+interchangeable. `chr9p_deletion_burden` is computed from CDKN2A/CDKN2B/JAK2 —
+i.e. it's substantially a re-encoding of 9p21 status, the same signal the
+ablation already measures. `genome_deletion_burden` (all 150 panel genes) is
+the actual "generic aneuploidy" control. Reporting only the combined feature
+set conflates the two and overstates what "deletion burden" means. This script
+now trains THREE variants — genome-only, chr9p-only, and both — so the
+narrative doesn't imply genome-wide burden alone explains the signal when it
+doesn't.
 
 Same label (-2 vs reference) and the SAME training/eval routine as the primary
-model (model.train_and_evaluate), so the comparison is apples-to-apples.
+model (model.train_and_evaluate), so every comparison is apples-to-apples.
 """
 
 from __future__ import annotations
@@ -43,41 +49,72 @@ def main():
     os.makedirs(M.MODELS_DIR, exist_ok=True)
     ds = data_prep.build_dataset()
     burden = compute_burden_features(ds)
-    burden_feats = ["genome_deletion_burden", "chr9p_deletion_burden"]
 
-    metrics, _ = M.train_and_evaluate(
-        burden, ds["y"], burden_feats,
-        label="deletion_burden_baseline", capture_curves=True,
-    )
+    variants = [
+        ("genome_only", ["genome_deletion_burden"]),
+        ("chr9p_only", ["chr9p_deletion_burden"]),
+        ("genome_plus_chr9p", ["genome_deletion_burden", "chr9p_deletion_burden"]),
+    ]
+    results = {}
+    for name, feats in variants:
+        m, _ = M.train_and_evaluate(
+            burden, ds["y"], feats, label=f"deletion_burden_{name}", capture_curves=True,
+        )
+        results[name] = m
+        cv = m["cv_5fold"]
+        print(f"=== deletion-burden [{name}] (features={feats}) ===")
+        print(f"  CV(5-fold)  ROC-AUC={m['cv_roc_auc']} (CI {m['cv_auc_ci95']['roc_auc_ci95']})  "
+              f"PR-AUC={m['cv_pr_auc']}  sens={cv['sensitivity']}  spec={cv['specificity']}  F1={cv['f1']}")
 
-    # Compare to the already-saved full (primary) model.
+    # Compare each to the already-saved full (primary) model.
     full = json.load(open(os.path.join(M.MODELS_DIR, "metrics.json")))
-    full_auc, base_auc = full["cv_roc_auc"], metrics["cv_roc_auc"]
-    beats = full_auc > base_auc
+    full_auc = full["cv_roc_auc"]
+
+    genome_auc = results["genome_only"]["cv_roc_auc"]
+    chr9p_auc = results["chr9p_only"]["cv_roc_auc"]
+    combined_auc = results["genome_plus_chr9p"]["cv_roc_auc"]
+    beats_combined = full_auc > combined_auc
+
     statement = (
-        f"The full {full['n_features']}-gene model {'outperforms' if beats else 'does NOT outperform'} "
-        f"the deletion-burden baseline (CV ROC-AUC {full_auc} vs {base_auc}), "
-        f"{'indicating it learns MTAP-relevant context beyond overall deletion load.' if beats else 'suggesting its signal may largely reflect overall deletion load.'}"
+        f"Genome-wide deletion burden ALONE is near chance (CV ROC-AUC {genome_auc}) — "
+        f"it carries essentially no signal. Almost all of the combined baseline's power "
+        f"(CV ROC-AUC {combined_auc}) comes from chr9p_deletion_burden alone "
+        f"(CV ROC-AUC {chr9p_auc}), which is a crude re-encoding of CDKN2A/CDKN2B "
+        f"copy-number status — the SAME signal the 9p21 ablation already measures, not an "
+        f"independent 'overall aneuploidy' explanation. The full {full['n_features']}-gene "
+        f"model {'outperforms' if beats_combined else 'does NOT outperform'} the combined "
+        f"burden baseline (CV ROC-AUC {full_auc} vs {combined_auc}). Conclusion: this "
+        f"comparison does NOT show the model is 'just learning deletion burden' in the "
+        f"genome-wide sense — genome-wide burden has no predictive value here. It does "
+        f"confirm (again, consistent with the ablation) that 9p21-local copy number "
+        f"dominates the -2-vs-reference discrimination."
     )
-    metrics["comparison_to_full_model"] = {
-        "full_model_cv_roc_auc": full_auc,
-        "full_model_cv_pr_auc": full["cv_pr_auc"],
-        "baseline_cv_roc_auc": base_auc,
-        "baseline_cv_pr_auc": metrics["cv_pr_auc"],
-        "full_model_outperforms": bool(beats),
-        "statement": statement,
+
+    combined = {
+        "label": "deletion_burden_baseline",
+        "variants": {name: m for name, m in results.items()},
+        "comparison_to_full_model": {
+            "full_model_cv_roc_auc": full_auc,
+            "full_model_cv_pr_auc": full["cv_pr_auc"],
+            "genome_only_cv_roc_auc": genome_auc,
+            "chr9p_only_cv_roc_auc": chr9p_auc,
+            "combined_cv_roc_auc": combined_auc,
+            "full_model_outperforms_combined": bool(beats_combined),
+            "chr9p_carries_the_signal": bool(chr9p_auc > genome_auc + 0.1),
+            "statement": statement,
+        },
+        # Kept at top level for backward-compat with anything reading the old shape.
+        "cv_roc_auc": combined_auc,
+        "cv_pr_auc": results["genome_plus_chr9p"]["cv_pr_auc"],
+        "cv_5fold": results["genome_plus_chr9p"]["cv_5fold"],
+        "roc_curve": results["genome_plus_chr9p"].get("roc_curve"),
+        "pr_curve": results["genome_plus_chr9p"].get("pr_curve"),
     }
 
     with open(OUT_PATH, "w") as f:
-        json.dump(metrics, f, indent=2)
+        json.dump(combined, f, indent=2)
 
-    cv = metrics["cv_5fold"]
-    print(f"=== deletion-burden baseline (features={metrics['n_features']}, "
-          f"pos={metrics['n_positive']}, ref={metrics['n_reference']}) ===")
-    print(f"  CV(5-fold)  ROC-AUC={base_auc}  PR-AUC={metrics['cv_pr_auc']}  "
-          f"sens={cv['sensitivity']}  spec={cv['specificity']}  F1={cv['f1']}")
-    print(f"  full model CV ROC-AUC={full_auc}")
-    print(f"  -> {statement}")
+    print(f"\n{statement}\n")
     print(f"  saved -> {OUT_PATH}")
 
 

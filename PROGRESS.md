@@ -193,3 +193,83 @@ The full model does **NOT** outperform the deletion-burden baseline — the
 control to lead with: it is a mature, honest finding, and it reframes the tool's
 contribution toward the expression-validation and review-routing story rather
 than raw discrimination.
+
+## 2026-07-08 — Audit fixes (all 17 findings addressed) — COMPLETE
+Fixed every gap from the technical audit. Grouped by what changed; each item
+verified to run clean (scripts + pytest + AppTest + live server, all green).
+
+**Correction to prior narrative:** the "deletion-burden baseline beats the
+full model" framing from the earlier session was imprecise. Decomposed:
+genome-wide burden ALONE is at chance (CV ROC-AUC **0.4969**); chr9p burden
+ALONE (CDKN2A/CDKN2B/JAK2) reaches **0.9798**; combined **0.9837**. The
+finding is "signal is 9p21-local," not "signal is deletion-burden-general" —
+the same conclusion as the ablation, not an independent confirmation of it.
+`deletion_burden.py` now trains and reports all three variants.
+
+**Statistical rigor added** (`model.py`):
+- Bootstrap 95% CI on CV ROC-AUC/PR-AUC (1000 resamples of CV OOF predictions)
+  on every model — primary, ablations, burden variants.
+- Youden's-J optimal threshold reported alongside the fixed-0.5 metrics
+  (class_weight='balanced' shifts the natural boundary; primary model's
+  Youden threshold = 0.2011, not 0.5).
+- **Permutation/null control** on the ablation: 20 replicates dropping 2
+  random non-9p21 genes give null AUC 0.9717 ± 0.0009 (range
+  [0.9697, 0.9742]); the true 9p21 drop (0.7751) falls **below every single
+  replicate** — confirms the ablation is 9p21-specific, not a generic
+  "any-2-features" artifact.
+
+**Cross-model + methodology gaps** (`secondary_model.py`, `shap_explain.py`):
+- XGBoost now scores the −1 queue too (previously only the logistic model
+  did). Agreement check: Spearman correlation **0.486**, exact tier agreement
+  **58%**, High-tier Jaccard **47%** (16/25 shared) — a real, previously-unknown
+  disagreement between the two models on who gets reviewed first. Deployed
+  queue still uses logistic only; not reconciled, flagged in the UI.
+- SHAP `LinearExplainer` now explicitly uses `feature_perturbation=
+  "correlation_dependent"` instead of the (undocumented) default — GISTIC
+  features are highly correlated (co-deletion blocks) and independence
+  assumptions distorted credit. Confirmed the fix mattered: JAK2 jumped from
+  outside the top 10 to #3 globally once correlation was accounted for.
+
+**Data/provenance transparency** (`model.py`, `genes.py`, `README.md`):
+- `provenance.json`'s `data_pull_date` was a hardcoded literal — now derived
+  from the actual cached raw-data file mtimes.
+- Reference class composition surfaced: GISTIC 0=118, 1=58, 2=1 — a third of
+  "reference" tumors are copy-gained, not neutral. Not previously visible
+  anywhere.
+- Deployed-vs-evaluated model distinction documented in provenance: the
+  model scoring the −1 queue is a third fit (refit on 100% of labeled data),
+  not the same model the CV/test metrics describe.
+- Panel gene list (`genes.py`) now carries an explicit honesty note: hand-
+  curated from general knowledge, not derived from this cohort's own GISTIC
+  peaks or a single cited driver census.
+- Tumor purity: checked cBioPortal's clinical-attributes API for this
+  cohort (60 attributes) — no ABSOLUTE purity field exists. Documented as an
+  honestly-unaddressed gap rather than silently skipped.
+
+**Engineering hardening** (`cbioportal_client.py`, `data_prep.py`,
+`requirements.txt`, `tests/`):
+- Cache files are now content-hash-gated (`_sig`/`_cache_valid`) — a changed
+  `PANEL_SYMBOLS` or cohort now triggers a re-pull instead of silently
+  serving a stale panel forever. `data_prep.py`'s own short-circuit (which
+  bypasses network entirely on a warm cache, by design) now validates its
+  own local signature file rather than only checking file existence.
+  Verified: cache-hit runs stayed network-free (0.4–1.2s) after the change.
+- Retry-with-backoff (3 attempts) added to every cBioPortal network call —
+  previously any transient blip killed the whole pull.
+- `requirements.txt` fully pinned to installed versions — unpinned deps had
+  already broken the build twice mid-project.
+- New `tests/test_pipeline_invariants.py` (14 tests, pytest): label/feature
+  invariants, no patient-level duplication, percentile-tier proportions,
+  cross-artifact consistency (ablation feature-count ordering, permutation
+  control extremity, CI containment). All pass.
+- `README.md` rewritten: honest-limitations section now lists every audit
+  finding with the specific numbers; new "Engineering / reproducibility
+  risks" section documents the bravado v2-endpoint risk explicitly.
+
+**Verification:** every script re-run clean (`model.py`, `model.py
+--ablations`, `secondary_model.py`, `deletion_burden.py`, `score_queue.py`,
+`shap_explain.py`), `pytest tests/ -v` 14/14 pass, AppTest 0 exceptions (6
+dataframes, 31 metrics, all new content confirmed present in rendered
+markdown/captions), live `streamlit run` health 200 with no log errors.
+
+Nothing from the audit was skipped or deferred.

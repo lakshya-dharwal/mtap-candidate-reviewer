@@ -6,6 +6,17 @@ across TCGA cohorts, plus bladder-relevant drivers). Hugo symbols are resolved
 to Entrez IDs via the cBioPortal /genes endpoint at build time (see
 cbioportal_client.resolve_symbols_to_entrez), so no Entrez IDs are hand-typed
 here except the three 9p21 core genes used as the label / neighborhood.
+
+PANEL PROVENANCE (honesty note, added post-audit): this list was hand-curated
+from general cancer-driver knowledge (well-known tumor suppressors + oncogenes
+recurrently altered across TCGA pan-cancer studies), NOT derived from an
+empirical GISTIC significant-peaks run on this specific bladder cohort, nor
+sourced from a single cited driver list (e.g. COSMIC Cancer Gene Census,
+Bailey et al. 2018 Cell "Comprehensive Characterization of Cancer Driver
+Genes"). It is a reasonable, defensible panel but not an empirically-derived
+or externally-audited one — a rigorous follow-up would re-derive it from this
+cohort's own GISTIC peaks or a cited census list and check the ablation/
+deletion-burden results are robust to the swap.
 """
 
 # --- Label / core 9p21 genes (Entrez, verified in Phase 1) ------------------ #
