@@ -16,17 +16,21 @@ import json
 import os
 
 import joblib
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd
 import streamlit as st
 
-import data_prep
-import model as M
-import score_queue
-import shap_explain
-import validate_expression as VE
+import data_prep  # noqa: E402
+import model as M  # noqa: E402
+import score_queue  # noqa: E402
+import shap_explain  # noqa: E402
 
 STUDY = data_prep.STUDY
 MODELS_DIR = M.MODELS_DIR
+SECONDARY_PATH = os.path.join(MODELS_DIR, "secondary_xgboost_metrics.json")
+DELETION_BURDEN_PATH = os.path.join(MODELS_DIR, "deletion_burden_metrics.json")
 
 # --- IDEAYA brand palette --------------------------------------------------- #
 NAVY = "#0C2D48"
@@ -91,6 +95,23 @@ def inject_css():
     .stDataFrame {{ border-radius:10px; overflow:hidden; }}
     a, .stMarkdown a {{ color:{BLUE}; }}
     footer {{ visibility:hidden; }}
+
+    /* Tabs */
+    .stTabs [data-baseweb="tab-list"] {{ gap: .3rem; border-bottom: 1px solid #D5E1EA; }}
+    .stTabs [data-baseweb="tab"] {{
+        font-family:'Poppins',sans-serif; font-weight:600; font-size:.92rem;
+        color:#5B7488; padding: .55rem 1.05rem; border-radius: 9px 9px 0 0;
+    }}
+    .stTabs [aria-selected="true"] {{ color:{NAVY}; background:#FFFFFF;
+        border-bottom: 3px solid {BLUE}; }}
+    .tab-sub {{ color:#5B7488; font-size:.95rem; margin:.2rem 0 1rem 0; }}
+
+    /* Purpose / limitation callout cards */
+    .callout {{ background:#FFFFFF; border-radius:12px; padding:1.1rem 1.35rem;
+        box-shadow:0 2px 10px rgba(12,45,72,0.07); border:1px solid #E1EAF1;
+        border-left:5px solid {BLUE}; margin-bottom:.8rem; }}
+    .callout h4 {{ margin:0 0 .5rem 0; font-size:1.05rem; }}
+    .check li {{ margin:.15rem 0; }}
     </style>
     """, unsafe_allow_html=True)
 
@@ -129,16 +150,24 @@ def load_all():
         pipe, ds["X"].loc[amb], feat, ds["X"].loc[labeled])
     q["why_flagged"] = q["sampleId"].map(why)
 
-    def _load_json(name):
-        p = os.path.join(MODELS_DIR, name)
+    # Global SHAP importance (top genes by mean |SHAP|) over the labeled set.
+    global_shap = shap_explain.global_importance(pipe, ds["X"].loc[labeled], feat)
+
+    def _load_path(p):
         return json.load(open(p)) if os.path.exists(p) else None
+
+    def _load_json(name):
+        return _load_path(os.path.join(MODELS_DIR, name))
 
     return {
         "ds": ds,
         "queue": q,
+        "global_shap": global_shap,
         "metrics": _load_json("metrics.json"),
         "ablation": _load_json("ablation_metrics.json"),
         "provenance": _load_json("provenance.json"),
+        "secondary": _load_path(SECONDARY_PATH),
+        "deletion_burden": _load_path(DELETION_BURDEN_PATH),
         "expr_stats": _load_json(f"expression_validation_{STUDY}.json"),
         "expr_fig": os.path.join(MODELS_DIR, f"expression_validation_{STUDY}.png"),
         "exclusions": pd.read_csv(data_prep.EXCLUSIONS_PATH)
@@ -147,51 +176,239 @@ def load_all():
 
 
 # --------------------------------------------------------------------------- #
+# Plot helpers (matplotlib, from cached curve arrays — no retraining)
+# --------------------------------------------------------------------------- #
+def _style_ax(ax):
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.grid(alpha=0.25)
+    return ax
+
+
+def plot_roc(metrics, secondary=None):
+    fig, ax = plt.subplots(figsize=(4.6, 3.8))
+    rc = metrics["roc_curve"]
+    ax.plot(rc["fpr"], rc["tpr"], color=BLUE, lw=2.2,
+            label=f"Logistic (AUC={metrics['cv_roc_auc']})")
+    if secondary and "roc_curve" in secondary:
+        src = secondary["roc_curve"]
+        ax.plot(src["fpr"], src["tpr"], color="#8E44AD", lw=1.8, ls="--",
+                label=f"XGBoost (AUC={secondary['cv_roc_auc']})")
+    ax.plot([0, 1], [0, 1], color="#9AB0BF", lw=1, ls=":")
+    ax.set_xlabel("False positive rate"); ax.set_ylabel("True positive rate")
+    ax.set_title("ROC (5-fold CV)", fontsize=11)
+    ax.legend(fontsize=8, loc="lower right"); _style_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_pr(metrics, secondary=None):
+    fig, ax = plt.subplots(figsize=(4.6, 3.8))
+    pc = metrics["pr_curve"]
+    ax.plot(pc["recall"], pc["precision"], color=BLUE, lw=2.2,
+            label=f"Logistic (AP={metrics['cv_pr_auc']})")
+    if secondary and "pr_curve" in secondary:
+        spc = secondary["pr_curve"]
+        ax.plot(spc["recall"], spc["precision"], color="#8E44AD", lw=1.8, ls="--",
+                label=f"XGBoost (AP={secondary['cv_pr_auc']})")
+    ax.set_xlabel("Recall"); ax.set_ylabel("Precision")
+    ax.set_title("Precision-Recall (5-fold CV)", fontsize=11)
+    ax.legend(fontsize=8, loc="lower left"); _style_ax(ax)
+    fig.tight_layout()
+    return fig
+
+
+def plot_shap_bar(global_shap, top_n=15):
+    top = global_shap.head(top_n).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(5.2, 4.6))
+    ax.barh(top["gene"], top["mean_abs_shap"], color=BLUE, alpha=0.85)
+    ax.set_xlabel("mean |SHAP|  (log-odds toward −2 resemblance)")
+    ax.set_title(f"Global feature importance — top {top_n}", fontsize=11)
+    _style_ax(ax); ax.grid(axis="y", alpha=0)
+    fig.tight_layout()
+    return fig
+
+
+# --------------------------------------------------------------------------- #
 # UI
 # --------------------------------------------------------------------------- #
-def main():
-    inject_css()
+def tab_overview(data):
+    ds, q, ab = data["ds"], data["queue"], data["ablation"]
+    role = ds["role"]
+    st.markdown('<div class="tab-sub">What this tool does, the headline results, '
+                'and where it stops.</div>', unsafe_allow_html=True)
+
     st.markdown("""
-    <div class="hero">
-        <h1>MTAP-Loss Candidate Reviewer</h1>
-        <p>An expression-validated review queue for ambiguous MTAP shallow-loss tumors</p>
+    <div class="callout">
+      <h4>Purpose</h4>
+      <b>MTAP</b> sits on chromosome 9p21, beside <b>CDKN2A/CDKN2B</b>, and is
+      co-deleted with them in most 9p21-loss tumors. Homozygous (deep) MTAP loss
+      makes tumors dependent on <b>MAT2A/PRMT5</b> — the target of IDEAYA's
+      IDE397 (MAT2A) and IDE892 (PRMT5) programs. Deep deletions (GISTIC −2) are
+      unambiguous, but <b>shallow −1 loss is ambiguous</b>: some cases are
+      functionally MTAP-deficient, some are not, and sequencing can miss them.
+      This tool trains on confirmed −2 deletions and <b>ranks the ambiguous −1
+      tumors whose copy-number profile resembles confirmed-deleted cases</b>,
+      for orthogonal human review. It does not diagnose or claim to find
+      "missed patients."
     </div>
     """, unsafe_allow_html=True)
 
-    data = load_all()
-    ds, q = data["ds"], data["queue"]
-    role = ds["role"]
-
-    # ---- Cohort & prevalence ---- #
-    section("COHORT & PREVALENCE", "Bladder — blca_tcga_pan_can_atlas_2018", ACCENTS[0],
-            "Prevalence verified from the pulled cohort, not literature estimates.")
-    st.selectbox("Cohort", [STUDY], index=0,
-                 help="Additional cohorts (PAAD/GBM) are future work.")
+    section("HEADLINE RESULTS", "At a glance", ACCENTS[0])
+    m = data["metrics"]
+    ab_9p21 = next((x for x in ab["models"]
+                    if x["label"] == "without_9p21_neighborhood"), None) if ab else None
+    es = data["expr_stats"]
+    p = es["mannwhitney_high_vs_low_ambiguous"]["p_value"] if es else None
     c = st.columns(4)
-    c[0].metric("Confirmed −2 (positive)", int((role == "positive").sum()))
-    c[1].metric("Ambiguous −1 (queue)", int((role == "ambiguous").sum()))
-    c[2].metric("Reference 0/1/2", int((role == "reference").sum()))
-    c[3].metric("Features (MTAP excluded)", len(ds["feature_genes"]))
+    c[0].metric("Primary CV ROC-AUC", m["cv_roc_auc"] if m else "—",
+                help="L2 logistic, 5-fold CV, full 150-gene panel")
+    c[1].metric("AUC without 9p21", ab_9p21["cv_roc_auc"] if ab_9p21 else "—",
+                help="CDKN2A+CDKN2B removed — the harsh ablation")
+    c[2].metric("Ambiguous −1 queued", int((role == "ambiguous").sum()))
+    c[3].metric("Expression high-vs-low", f"p = {p:.3g}" if p is not None else "—",
+                help="Mann-Whitney; a null result, reported honestly")
+    if p is not None and p >= 0.05:
+        st.caption("Expression validation is a **null result** on this cohort "
+                   f"(p = {p:.3g}, n.s.): high-priority −1 cases do not yet show "
+                   "significantly lower MTAP expression than low-priority −1 cases. "
+                   "Reported as-is, not spun.")
 
-    # ---- Model performance / ablations ---- #
-    section("MODEL PERFORMANCE", "Three-way ablation", ACCENTS[1],
-            "L2 logistic regression, class-weight balanced, 5-fold CV, seed 42. "
-            "MTAP is the label and never a feature.")
-    ab = data["ablation"]
+    lim, san = st.columns(2)
+    with lim:
+        section("KNOWN LIMITATIONS", "& next steps", ACCENTS[1])
+        st.markdown("""
+        <div class="callout check">
+        <ul>
+          <li>Single cohort (bladder only) — needs external / cross-cohort validation.</li>
+          <li>Deletion-burden baseline still to add (is signal MTAP-specific?).</li>
+          <li>Model scores are <b>not yet calibrated</b> probabilities.</li>
+          <li>Shallow −1 loss is biologically heterogeneous — tumor purity,
+              subclonality, segmentation noise.</li>
+          <li>Prioritizes cases for review; <b>not a diagnostic</b>.</li>
+        </ul>
+        </div>
+        """, unsafe_allow_html=True)
+    with san:
+        section("MODEL SANITY CHECKS", "leakage & robustness", ACCENTS[2])
+        burden_done = data["deletion_burden"] is not None
+        checks = [
+            ("MTAP excluded from features", True),
+            ("CDKN2A / CDKN2B ablation run", True),
+            ("Full 9p21-neighborhood ablation run", True),
+            ("Cross-validation (5-fold)", True),
+            ("Deletion-burden baseline", burden_done),
+            ("Score calibration", False),
+            ("External validation", False),
+        ]
+        pending = ' <span style="color:#5B7488">(pending)</span>'
+        rows = "".join(
+            "<li>{} {}{}</li>".format(
+                "✓" if ok else "○", name, "" if ok else pending)
+            for name, ok in checks)
+        st.markdown('<div class="callout check"><ul style="list-style:none;'
+                    f'padding-left:0">{rows}</ul></div>', unsafe_allow_html=True)
+
+
+def tab_how_it_works(data):
+    ds = data["ds"]
+    st.markdown('<div class="tab-sub">The label strategy and data flow — '
+                'conceptual, no code.</div>', unsafe_allow_html=True)
+
+    section("LABEL STRATEGY", "Train on the confident, score the ambiguous", ACCENTS[0])
+    st.markdown("""
+    | MTAP GISTIC | Role | Used how |
+    |---|---|---|
+    | **−2** deep deletion | positive | trained on (confident) |
+    | **0 / 1 / 2** | reference | trained on (confident) |
+    | **−1** shallow loss | ambiguous | **held out**, scored for resemblance |
+
+    MTAP is the **label**, so it is never a feature (no leakage). MTAP
+    *expression* is used only for orthogonal validation — never as a feature.
+    """)
+
+    section("DATA FLOW", "cBioPortal → queue", ACCENTS[1])
+    st.markdown(f"""
+    1. **cBioPortal** — pull the bladder cohort `{STUDY}` (GISTIC CNA + MTAP RNA-seq), cached to CSV.
+    2. **{len(ds['X'])} tumors** with an MTAP call → feature matrix of
+       **{len(ds['feature_genes'])} recurrently-altered genes** (MTAP excluded).
+    3. **Model** — L2 logistic regression, class-weight balanced, 5-fold CV,
+       trained on −2 vs reference; XGBoost as a secondary comparison.
+    4. **Score the −1 set** → rank by model score → **percentile tiers**
+       (top 20% High, next 30% Medium, bottom 50% Low).
+    5. **Validate** the ranking against MTAP expression (orthogonal, not part of the score).
+    """)
+
+
+def tab_review_queue(data):
+    q = data["queue"]
+    st.markdown('<div class="tab-sub">The primary deliverable: ambiguous −1 '
+                'cases ranked for orthogonal review.</div>', unsafe_allow_html=True)
+
+    section("REVIEW QUEUE", "Percentile-tiered candidates", ACCENTS[0],
+            "Ranked by model score of resembling confirmed −2 deletions. "
+            "Tiers are percentiles of the scored set, not fixed cutoffs.")
+    tcounts = q["review_tier"].value_counts()
+    tc = st.columns(3)
+    tc[0].metric("High (top 20%)", int(tcounts.get("High", 0)))
+    tc[1].metric("Medium (next 30%)", int(tcounts.get("Medium", 0)))
+    tc[2].metric("Low (bottom 50%)", int(tcounts.get("Low", 0)))
+
+    tiers = st.multiselect("Filter by review tier", ["High", "Medium", "Low"],
+                           default=["High", "Medium", "Low"])
+    view = q[q["review_tier"].isin(tiers)].copy()
+    view = view.rename(columns={
+        "sampleId": "Sample", "model_probability": "Model score",
+        "review_tier": "Tier", "MTAP_cna": "MTAP", "CDKN2A_cna": "CDKN2A",
+        "CDKN2B_cna": "CDKN2B", "MTAP_expr_pctile": "MTAP expr %ile",
+        "why_flagged": "Why flagged (top SHAP)"})
+    view["Model score"] = view["Model score"].round(3)
+    st.dataframe(
+        view[["Sample", "Model score", "Tier", "MTAP", "CDKN2A", "CDKN2B",
+              "MTAP expr %ile", "Why flagged (top SHAP)"]],
+        hide_index=True, width="stretch",
+        column_config={"Model score": st.column_config.ProgressColumn(
+            "Model score", min_value=0.0, max_value=1.0, format="%.3f")})
+    st.caption(f"n = {len(view)} shown of {len(q)} ambiguous cases. Arrows in "
+               "'why flagged' show push toward (↑) / away from (↓) resembling a "
+               "confirmed deletion; parenthetical is the patient's GISTIC value. "
+               "'Model score' is the logistic output — a ranking score, not a "
+               "calibrated probability.")
+
+
+def tab_validation(data):
+    st.markdown('<div class="tab-sub">Every performance, explainability, and '
+                'validation figure — findable during Q&A.</div>', unsafe_allow_html=True)
+    m, ab = data["metrics"], data["ablation"]
+    sec = data["secondary"]
+
+    section("DISCRIMINATION", "ROC & precision-recall (5-fold CV)", ACCENTS[0])
+    cc = st.columns(2)
+    if m and "roc_curve" in m:
+        cc[0].pyplot(plot_roc(m, sec))
+        cc[1].pyplot(plot_pr(m, sec))
+    if m:
+        cm = m["test_at_0.5"]["confusion_matrix"]
+        st.markdown("**Confusion matrix** (held-out 20%, threshold 0.5)")
+        cm_df = pd.DataFrame(
+            [[cm["tn"], cm["fp"]], [cm["fn"], cm["tp"]]],
+            index=["Actual reference", "Actual −2"],
+            columns=["Pred reference", "Pred −2"])
+        st.dataframe(cm_df, width="content")
+
+    section("THREE-WAY ABLATION", "Does it learn beyond the 9p21 neighbor?", ACCENTS[1],
+            "L2 logistic, identical setup; only the feature set changes.")
     if ab:
         rows = []
-        for m in ab["models"]:
-            cv = m["cv_5fold"]
+        for x in ab["models"]:
+            cv = x["cv_5fold"]
             rows.append({
-                "Model": m["label"].replace("_", " "),
-                "Features": m["n_features"],
-                "CV ROC-AUC": m["cv_roc_auc"], "CV PR-AUC": m["cv_pr_auc"],
+                "Model": x["label"].replace("_", " "), "Features": x["n_features"],
+                "CV ROC-AUC": x["cv_roc_auc"], "CV PR-AUC": x["cv_pr_auc"],
                 "Sensitivity": cv["sensitivity"], "Specificity": cv["specificity"],
-                "F1": cv["f1"], "Test ROC-AUC": m["test_roc_auc"],
-            })
+                "F1": cv["f1"], "Test ROC-AUC": x["test_roc_auc"]})
         cols = st.columns(3)
-        for i, m in enumerate(ab["models"]):
-            cols[i].metric(m["label"].replace("_", " "), m["cv_roc_auc"],
+        for i, x in enumerate(ab["models"]):
+            cols[i].metric(x["label"].replace("_", " "), x["cv_roc_auc"],
                            help="CV 5-fold ROC-AUC")
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
         st.caption(f"Model 3 drops the 9p21 neighborhood: "
@@ -199,17 +416,38 @@ def main():
                    f"n_positive={ab['models'][0]['n_positive']}, "
                    f"n_reference={ab['models'][0]['n_reference']}.")
 
-    # ---- Expression validation ---- #
+    if sec:
+        section("SECONDARY MODEL", "XGBoost comparison", ACCENTS[2],
+                "Nonlinear comparison point; logistic stays primary.")
+        sc = st.columns(2)
+        sc[0].metric("XGBoost CV ROC-AUC", sec["cv_roc_auc"])
+        sc[1].metric("Logistic CV ROC-AUC", m["cv_roc_auc"] if m else "—")
+        if m:
+            st.caption(f"XGBoost achieves CV ROC-AUC {sec['cv_roc_auc']} vs "
+                       f"{m['cv_roc_auc']} for the primary logistic model "
+                       f"(same 150 features, same folds, seed 42).")
+
+    if data["deletion_burden"]:
+        db = data["deletion_burden"]
+        section("DELETION-BURDEN BASELINE", "Is the signal MTAP-specific?", ACCENTS[0],
+                "Baseline trained on only genome-wide + 9p deletion burden.")
+        bc = st.columns(2)
+        bc[0].metric("Full model CV ROC-AUC", db["comparison_to_full_model"]["full_model_cv_roc_auc"])
+        bc[1].metric("Burden baseline CV ROC-AUC", db["cv_roc_auc"])
+        st.caption(db["comparison_to_full_model"]["statement"])
+
+    section("GLOBAL EXPLAINABILITY", "Which genes drive the score", ACCENTS[1])
+    st.pyplot(plot_shap_bar(data["global_shap"]))
+
     section("EXPRESSION VALIDATION", "Orthogonal evidence: MTAP RNA-seq", ACCENTS[2],
-            "The queue is ranked by CNA-model probability only; expression is shown "
-            "as independent validation, not part of the score.")
+            "The queue is ranked by model score only; expression is independent "
+            "validation, not part of the score.")
     es = data["expr_stats"]
     left, right = st.columns([3, 2])
     if os.path.exists(data["expr_fig"]):
         left.image(data["expr_fig"], width="stretch")
     if es:
-        med = es["group_median_log2"]
-        for k, v in med.items():
+        for k, v in es["group_median_log2"].items():
             right.metric(k.replace("\n", " "), v, help="median log2(RSEM+1)")
         mw = es["mannwhitney_high_vs_low_ambiguous"]
         p = mw["p_value"]
@@ -223,35 +461,21 @@ def main():
             f"U={mw['U']:.0f}, n_high={mw['n_high']}, n_low={mw['n_low']}</span></div>",
             unsafe_allow_html=True)
 
-    # ---- Review queue ---- #
-    section("REVIEW QUEUE", "Ambiguous −1 cases ranked for orthogonal review", ACCENTS[0],
-            "Ranked by model probability of resembling confirmed −2 deletions.")
-    tcounts = q["review_tier"].value_counts()
-    tc = st.columns(3)
-    tc[0].metric("High (>0.75)", int(tcounts.get("High", 0)))
-    tc[1].metric("Medium (0.50–0.75)", int(tcounts.get("Medium", 0)))
-    tc[2].metric("Low (<0.50)", int(tcounts.get("Low", 0)))
 
-    tiers = st.multiselect("Filter by review tier", ["High", "Medium", "Low"],
-                           default=["High", "Medium", "Low"])
-    view = q[q["review_tier"].isin(tiers)].copy()
-    view = view.rename(columns={
-        "sampleId": "Sample", "model_probability": "Model prob.",
-        "review_tier": "Tier", "MTAP_cna": "MTAP", "CDKN2A_cna": "CDKN2A",
-        "CDKN2B_cna": "CDKN2B", "MTAP_expr_pctile": "MTAP expr %ile",
-        "why_flagged": "Why flagged (top SHAP)"})
-    view["Model prob."] = view["Model prob."].round(3)
-    st.dataframe(
-        view[["Sample", "Model prob.", "Tier", "MTAP", "CDKN2A", "CDKN2B",
-              "MTAP expr %ile", "Why flagged (top SHAP)"]],
-        hide_index=True, width="stretch",
-        column_config={"Model prob.": st.column_config.ProgressColumn(
-            "Model prob.", min_value=0.0, max_value=1.0, format="%.3f")})
-    st.caption(f"n = {len(view)} shown of {len(q)} ambiguous cases. Arrows in "
-               "'why flagged' show push toward (↑) / away from (↓) resembling a "
-               "confirmed deletion; parenthetical is the patient's GISTIC value.")
+def tab_provenance(data):
+    ds = data["ds"]
+    st.markdown('<div class="tab-sub">Audit spine — cohort, counts, seed, '
+                'exclusions, raw data.</div>', unsafe_allow_html=True)
 
-    # ---- Data-integrity spine ---- #
+    section("COHORT & PREVALENCE", f"Bladder — {STUDY}", ACCENTS[0],
+            "Prevalence verified from the pulled cohort, not literature estimates.")
+    role = ds["role"]
+    c = st.columns(4)
+    c[0].metric("Confirmed −2 (positive)", int((role == "positive").sum()))
+    c[1].metric("Ambiguous −1 (queue)", int((role == "ambiguous").sum()))
+    c[2].metric("Reference 0/1/2", int((role == "reference").sum()))
+    c[3].metric("Features (MTAP excluded)", len(ds["feature_genes"]))
+
     section("DATA PROVENANCE", "Audit & inspection readiness", ACCENTS[1])
     prov = data["provenance"]
     if prov:
@@ -269,6 +493,33 @@ def main():
         st.dataframe(ex, hide_index=True, width="stretch")
     st.caption("Clean-label discipline: high-confidence −2 / reference set trains "
                "the model; the ambiguous −1 middle is quarantined for review.")
+
+    section("RAW DATA PREVIEW", "Feature matrix (first rows)", ACCENTS[0])
+    st.dataframe(ds["X"].head(), width="stretch")
+
+
+def main():
+    inject_css()
+    st.markdown("""
+    <div class="hero">
+        <h1>MTAP-Loss Candidate Reviewer</h1>
+        <p>An expression-validated review queue for ambiguous MTAP shallow-loss tumors</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    data = load_all()
+    tabs = st.tabs(["Overview", "How It Works", "Review Queue",
+                    "Validation & Explainability", "Data & Provenance"])
+    with tabs[0]:
+        tab_overview(data)
+    with tabs[1]:
+        tab_how_it_works(data)
+    with tabs[2]:
+        tab_review_queue(data)
+    with tabs[3]:
+        tab_validation(data)
+    with tabs[4]:
+        tab_provenance(data)
 
 
 if __name__ == "__main__":

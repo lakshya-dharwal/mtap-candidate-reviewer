@@ -22,7 +22,9 @@ from sklearn.metrics import (
     average_precision_score,
     confusion_matrix,
     f1_score,
+    precision_recall_curve,
     roc_auc_score,
+    roc_curve,
 )
 from sklearn.model_selection import StratifiedKFold, cross_val_predict, train_test_split
 from sklearn.pipeline import Pipeline
@@ -59,10 +61,13 @@ def _metrics_at_threshold(y_true, proba, thr=0.5):
     }
 
 
-def train_and_evaluate(X, y, feature_genes, label="main", random_state=RANDOM_STATE):
+def train_and_evaluate(X, y, feature_genes, label="main", random_state=RANDOM_STATE,
+                       capture_curves=False):
     """Train + evaluate on the labeled subset restricted to `feature_genes`.
 
-    Returns (metrics_dict, pipeline_fit_on_all_labeled).
+    Returns (metrics_dict, pipeline_fit_on_all_labeled). If capture_curves is
+    True, adds ROC/PR curve arrays (from the CV out-of-fold predictions) to the
+    metrics dict — purely additive, does not affect any scalar metric.
     """
     labeled = y.notna()
     Xl = X.loc[labeled, feature_genes]
@@ -101,6 +106,13 @@ def train_and_evaluate(X, y, feature_genes, label="main", random_state=RANDOM_ST
         "test_pr_auc": round(test_pr, 4),
         "test_at_0.5": test_thr,
     }
+
+    if capture_curves:
+        fpr, tpr, _ = roc_curve(yl, oof)
+        prec, rec, _ = precision_recall_curve(yl, oof)
+        metrics["roc_curve"] = {"fpr": fpr.round(5).tolist(), "tpr": tpr.round(5).tolist()}
+        metrics["pr_curve"] = {"precision": prec.round(5).tolist(),
+                               "recall": rec.round(5).tolist()}
 
     # Refit on ALL labeled data for inference scoring of the -1 set.
     final = make_pipeline().fit(Xl, yl)
@@ -183,7 +195,8 @@ def main():
     data_prep.summarize(ds)
 
     metrics, final = train_and_evaluate(
-        ds["X"], ds["y"], ds["feature_genes"], label="main_with_CDKN2A"
+        ds["X"], ds["y"], ds["feature_genes"], label="main_with_CDKN2A",
+        capture_curves=True,
     )
     print_metrics(metrics)
 

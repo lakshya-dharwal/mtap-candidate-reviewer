@@ -135,3 +135,34 @@ exceptions, 3 dataframes / 18 metrics, tier-filter interaction works.
 Pushed to origin (github.com/lakshya-dharwal/mtap-candidate-reviewer).
 Per instructions: STOP. Phase 8 (pan-cancer, XGBoost secondary, concordance)
 NOT built — it is the cut list.
+
+## 2026-07-08 — Stage 1 (tabbed demo UI + honesty fixes) — COMPLETE
+Reorganized the single-scroll app into 5 tabs; no data/metric dropped. Small
+honesty fixes plus additive new artifacts (curves, confusion matrix, XGBoost
+comparison). Verified via AppTest (no exceptions, 5 tabs, 5 dataframes, 24
+metrics; values match: CV ROC-AUC 0.9716, AUC-without-9p21 0.7751, 125 queued,
+expression p=0.111) and a live `streamlit run` (health 200, no log errors).
+
+- **Percentile tiers** (`score_queue.py`): top 20% High / next 30% Medium /
+  bottom 50% Low → 25 / 38 / 62 of the 125 ambiguous cases (was fixed 0.75/0.50
+  score cutoffs). API/columns unchanged.
+- **ROC/PR curves** (`model.py`): additive `capture_curves` param stores CV
+  out-of-fold curve arrays in `metrics.json`. Primary scalar numbers unchanged
+  (same seed/data) — CV ROC-AUC still 0.9716.
+- **XGBoost secondary** (`secondary_model.py`, new): same 150 features / folds /
+  seed. CV ROC-AUC 0.9861, PR-AUC 0.9621 → `models/secondary_xgboost_metrics.json`.
+  Comparison only; logistic stays primary.
+- **UI honesty**: "probability" → "model score" everywhere; tier captions now
+  "(top 20%)/(next 30%)/(bottom 50%)"; expression stated as a null result.
+- **New panels**: Overview (purpose, headline-results strip, Known Limitations,
+  Model Sanity Checks — deletion-burden line file-gated to "(pending)"),
+  How It Works, and in Validation: ROC/PR plots, confusion matrix, global-SHAP
+  bar, XGBoost card. Raw-data preview in Data & Provenance.
+- **Stage-2 safety**: the sanity-check line + burden card are gated on
+  `models/deletion_burden_metrics.json` existing — Stage 2 needs zero app.py
+  edits, and deleting that file fully reverts the UI.
+
+Note (Py 3.11): fixed an f-string with backslash-escaped quotes inside `{}`
+(SyntaxError pre-3.12) by moving the span literal out of the expression.
+
+Next: Stage 2 (deletion-burden baseline).
